@@ -37,7 +37,7 @@ OFFSET_RATE = 5      # 達成率
 ROW_IDX_COEFF = 8      # 9行目（係数）
 ROW_IDX_AVG = 10       # 11行目（全社平均）
 ROW_IDX_DATE = 12      # 13行目（日付）
-ROW_IDX_ITEM_NAME = 15 # 16行目（項目名） ←ここを探します
+ROW_IDX_ITEM_NAME = 15 # 16行目（項目名）
 ROW_IDX_HEADER = 16    # 17行目（ヘッダー）
 
 COL_IDX_STORE = 17  # R列
@@ -48,12 +48,11 @@ COL_IDX_TOTAL = 19  # T列
 st.sidebar.header("⚙️ 設定")
 uploaded_file = st.sidebar.file_uploader("ランキングデータ（Excel）", type=["xlsx", "xls"])
 
-remaining_days = 1 # 初期値
+remaining_days = 1 
 
 if uploaded_file is not None:
     try:
         # --- A. メタデータ読み込み（上部20行分） ---
-        # シート全体を読み込むと重いので、まずはヘッダー周辺だけ
         try:
             meta_df = pd.read_excel(uploaded_file, sheet_name=SHEET_NAME, header=None, nrows=20)
         except ValueError:
@@ -82,11 +81,9 @@ if uploaded_file is not None:
         except:
             remaining_days = st.sidebar.number_input("今月の残り日数", min_value=1, value=10)
 
-        # 2. 項目名の列位置を特定 (16行目 = index 15)
+        # 2. 項目名の列位置を特定 (16行目)
         item_row = meta_df.iloc[ROW_IDX_ITEM_NAME]
         found_items = {} 
-        
-        # 16行目を走査して、TARGET_ITEM_NAMESにある名前を探す
         for col_idx, cell_val in enumerate(item_row):
             val_str = str(cell_val).strip().replace('　', '')
             if val_str in TARGET_ITEM_NAMES:
@@ -117,8 +114,6 @@ if uploaded_file is not None:
         
         with col_main_1:
             selected_store = st.selectbox("📍 分析する店舗を選択", available_stores)
-            
-            # 自店舗データの行を取得
             my_row = df[df.iloc[:, COL_IDX_STORE] == selected_store].iloc[0]
             my_current_rank = my_row.iloc[COL_IDX_RANK]
             my_current_pt = my_row.iloc[COL_IDX_TOTAL]
@@ -152,15 +147,13 @@ if uploaded_file is not None:
             analysis_list = []
             debug_data = []
 
-            # 特定した項目の列位置を使ってデータを取得
             for item_name, col_idx in found_items.items():
                 try:
-                    # 1. 係数 (9行目, 項目名の列)
+                    # 1. 係数 (9行目)
                     unit_pt_val = meta_df.iloc[ROW_IDX_COEFF, col_idx]
                     unit_pt = pd.to_numeric(unit_pt_val, errors='coerce') or 0
                     
                     # 2. 全社平均 (11行目, 達成率列 = 項目列 + 5)
-                    # ★ここが重要：項目名の列(col_idx)から5つ右を見る
                     avg_rate_col_idx = col_idx + OFFSET_RATE
                     avg_rate_val = meta_df.iloc[ROW_IDX_AVG, avg_rate_col_idx]
                     company_avg_rate = pd.to_numeric(avg_rate_val, errors='coerce') or 0
@@ -169,28 +162,39 @@ if uploaded_file is not None:
                     my_rate = pd.to_numeric(my_row.iloc[col_idx + OFFSET_RATE], errors='coerce') or 0
                     my_target_vol = pd.to_numeric(my_row.iloc[col_idx + OFFSET_TARGET], errors='coerce') or 0
                     
-                    # 4. ギャップ (平均 - 自店)
+                    # 4. ギャップ計算（単位自動判定）
                     rate_gap = company_avg_rate - my_rate
+                    
+                    # 【重要修正】データが「91」なのか「0.91」なのかで計算を変える
+                    # 平均値が 2.0 (200%) を超える場合は「整数(%)」とみなす、それ以下は「小数」とみなす
+                    is_percentage_integer = (company_avg_rate > 5) 
+                    
+                    # 表示用の補正（%表示のため）
+                    disp_my_rate = my_rate if is_percentage_integer else my_rate * 100
+                    disp_avg_rate = company_avg_rate if is_percentage_integer else company_avg_rate * 100
                     
                     debug_data.append({
                         "項目": item_name,
-                        "列番号": col_idx,
-                        "自店率": f"{my_rate:.1f}%",
-                        "全社平均": f"{company_avg_rate:.1f}%",
-                        "乖離": f"{rate_gap:.1f}%",
+                        "自店(生)": my_rate,
+                        "平均(生)": company_avg_rate,
+                        "目標": my_target_vol,
                         "係数": unit_pt
                     })
 
                     if rate_gap > 0:
-                        needed_vol = (rate_gap / 100) * my_target_vol
+                        # 整数(91)なら 100で割る、小数(0.91)なら そのまま差分を使う
+                        factor = (rate_gap / 100) if is_percentage_integer else rate_gap
+                        
+                        needed_vol = factor * my_target_vol
                         needed_vol = math.ceil(needed_vol)
+                        
                         gain_pt = needed_vol * unit_pt
                         daily_vol = needed_vol / remaining_days
 
                         analysis_list.append({
                             "name": item_name,
-                            "current_rate": my_rate,
-                            "target_rate": company_avg_rate,
+                            "current_rate": disp_my_rate,
+                            "target_rate": disp_avg_rate,
                             "gain_pt": gain_pt,
                             "needed_vol": needed_vol,
                             "daily_vol": daily_vol,
@@ -202,7 +206,9 @@ if uploaded_file is not None:
             top_5_items = sorted(analysis_list, key=lambda x: x['gain_pt'], reverse=True)[:5]
 
             if not top_5_items:
-                st.warning("全社平均を下回っている項目はありませんでした。")
+                st.warning("平均を下回っている項目はありません。")
+                with st.expander("詳細デバッグ"):
+                    st.dataframe(pd.DataFrame(debug_data))
             else:
                 # テーブル表示
                 h_cols = st.columns([2, 1.5, 1.5, 1.5, 1.5, 1.5])
@@ -243,10 +249,6 @@ if uploaded_file is not None:
                 else:
                     c_final2.warning(f"平均並みに改善で + {int(total_gain):,} pt ですが、まだ {int(remaining_gap):,} pt 不足。")
 
-            with st.expander("🛠 読み取りデータ確認（デバッグ用）"):
-                st.dataframe(pd.DataFrame(debug_data))
-                st.write(f"検出された項目数: {len(found_items)}")
-                
         else:
             st.balloons()
             st.success("現在、目標ランクの平均値を上回っています！")
@@ -256,3 +258,4 @@ if uploaded_file is not None:
 
 else:
     st.info("👈 サイドバーからExcelファイルをアップロードしてください。")
+
