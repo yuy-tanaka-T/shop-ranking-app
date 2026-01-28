@@ -3,6 +3,7 @@ import pandas as pd
 import math
 from datetime import datetime
 import calendar
+import re
 
 # --- ページ設定 ---
 st.set_page_config(page_title="店舗目標達成シミュレーター", layout="wide")
@@ -25,16 +26,16 @@ TARGET_ITEM_NAMES = [
 ]
 
 # 列の相対位置（項目名の列=0とした場合）
-OFFSET_PT = 0        # ポイント
-OFFSET_RANK_VAL = 1  # 順位（項目別）
-OFFSET_TARGET = 2    # 目標数
-OFFSET_ACTUAL = 3    # 実績数
+# 右に 順位・目標・実績・着地・達成率 が並んでいる
+OFFSET_RANK_VAL = 1  # 順位
+OFFSET_TARGET = 2    # 目標
+OFFSET_ACTUAL = 3    # 実績
 OFFSET_LANDING = 4   # 着地
 OFFSET_RATE = 5      # 達成率
-OFFSET_UNIT_PT = 6   # 1件あたりのPt
 
 # 固定位置情報（Excelの行列）
-HEADER_ROW_NUM = 17 
+COEFF_ROW_NUM = 9   # 係数が記載されている行（9行目）
+HEADER_ROW_NUM = 17 # ヘッダー行（17行目）
 COL_IDX_STORE = 17  # R列
 COL_IDX_RANK = 18   # S列
 COL_IDX_TOTAL = 19  # T列
@@ -50,26 +51,40 @@ if uploaded_file is not None:
         # --- A. 日付の取得 (C13セル) ---
         try:
             date_df = pd.read_excel(uploaded_file, header=None, usecols="C", skiprows=12, nrows=1)
-            raw_date = date_df.iloc[0, 0]
-            base_date = pd.to_datetime(raw_date, errors='coerce')
+            raw_text = str(date_df.iloc[0, 0])
             
-            if pd.notnull(base_date):
-                last_day = calendar.monthrange(base_date.year, base_date.month)[1]
-                calc_days = max(1, last_day - base_date.day)
-                st.sidebar.success(f"📅 基準日: {base_date.month}/{base_date.day}")
-                remaining_days = st.sidebar.number_input("今月の残り日数", min_value=1, value=calc_days, help="C13セルの日付から自動計算しています")
+            match = re.search(r'(\d{4}[-/]\d{1,2}[-/]\d{1,2})', raw_text)
+            
+            if match:
+                date_str = match.group(1)
+                base_date = pd.to_datetime(date_str, errors='coerce')
+                
+                if pd.notnull(base_date):
+                    last_day = calendar.monthrange(base_date.year, base_date.month)[1]
+                    calc_days = max(1, last_day - base_date.day)
+                    st.sidebar.success(f"📅 基準日: {base_date.strftime('%Y/%m/%d')}")
+                    remaining_days = st.sidebar.number_input("今月の残り日数", min_value=1, value=calc_days, help="C13セルの日付から自動計算")
+                else:
+                    raise ValueError("日付変換失敗")
             else:
-                st.sidebar.warning("C13セルから日付を読み取れませんでした。")
+                st.sidebar.warning(f"C13セルから日付が見つかりませんでした。")
                 remaining_days = st.sidebar.number_input("今月の残り日数", min_value=1, value=10)
-        except:
+
+        except Exception as e:
+            st.sidebar.error(f"日付読み取りエラー: {e}")
             remaining_days = st.sidebar.number_input("今月の残り日数", min_value=1, value=10)
 
-        # ファイルポインタを先頭に戻す
+        # ファイルポインタを戻す
         uploaded_file.seek(0)
 
-        # --- B. メインデータの読み込み ---
+        # --- B. 係数行（9行目）の読み込み ---
+        # 9行目だけを読み込み（列位置の基準とするため、ヘッダーなしで読む）
+        coeff_df = pd.read_excel(uploaded_file, header=None, skiprows=COEFF_ROW_NUM - 1, nrows=1)
+        
+        uploaded_file.seek(0)
+
+        # --- C. メインデータの読み込み（17行目ヘッダー） ---
         df = pd.read_excel(uploaded_file, header=HEADER_ROW_NUM - 1)
-        # 列名の空白除去（全角スペースなども削除）
         df.columns = df.columns.astype(str).str.strip().str.replace('　', '')
 
         # 基本情報の抽出
@@ -85,22 +100,15 @@ if uploaded_file is not None:
             if item in df.columns:
                 found_items[item] = df.columns.get_loc(item)
 
-        # --- 2. 店舗選択（指定リストでフィルタリング） ---
+        # --- 2. 店舗選択 ---
         st.markdown("---")
         
-        # Excelにある全店舗名を取得
         excel_stores = df.iloc[:, COL_IDX_STORE].astype(str).unique().tolist()
-        
-        # 指定リスト(ALLOWED_STORES)にある店舗だけを残す
-        # ※Excel内の名前と完全に一致する必要があります（半角全角に注意）
         available_stores = [s for s in excel_stores if s in ALLOWED_STORES]
         
-        # もし1つも一致しない場合は、Excelにあるものをそのまま出す（救済措置）
         if not available_stores:
             available_stores = sorted(excel_stores)
         else:
-            # 指定の順序に並べ替えるならこちら
-            # available_stores = sorted(available_stores, key=lambda x: ALLOWED_STORES.index(x))
             available_stores = sorted(available_stores)
 
         col_main_1, col_main_2 = st.columns([1, 2])
@@ -108,12 +116,11 @@ if uploaded_file is not None:
         with col_main_1:
             selected_store = st.selectbox("📍 分析する店舗を選択", available_stores)
             
-            # 自店舗データ取得
             my_row = df[df.iloc[:, COL_IDX_STORE] == selected_store].iloc[0]
             my_current_rank = my_row.iloc[COL_IDX_RANK]
             my_current_pt = my_row.iloc[COL_IDX_TOTAL]
 
-        # --- 3. 目標設定（ランク選択方式） ---
+        # --- 3. 目標設定 ---
         with col_main_2:
             st.info(f"店舗: **{selected_store}** （現在: {my_current_rank}ランク / {int(my_current_pt):,} pt）")
             
@@ -122,7 +129,6 @@ if uploaded_file is not None:
             st.markdown("##### 🎯 目標ランク設定")
             target_rank = st.selectbox("目指すランクを選択してください", unique_ranks, index=0)
             
-            # ランク平均Ptの計算
             target_rank_df = df[df.iloc[:, COL_IDX_RANK] == target_rank]
             if len(target_rank_df) > 0:
                 target_avg_pt = target_rank_df.iloc[:, COL_IDX_TOTAL].mean()
@@ -143,23 +149,30 @@ if uploaded_file is not None:
         if gap > 0:
             st.markdown("---")
             st.subheader(f"📊 {target_rank}ランク平均に追いつくための重点 5項目")
-            st.markdown(f"目標ランク（{target_rank}）の平均達成率に届いていない項目を抽出しました。")
+            st.markdown(f"目標ランク（{target_rank}）の平均達成率に届いていない項目を抽出し、**目標率に到達した場合のポイント増**を試算します。")
 
             analysis_list = []
 
-            for item_name, base_idx in found_items.items():
+            for item_name, col_idx in found_items.items():
                 try:
-                    my_rate = pd.to_numeric(my_row.iloc[base_idx + OFFSET_RATE], errors='coerce') or 0
-                    my_target_vol = pd.to_numeric(my_row.iloc[base_idx + OFFSET_TARGET], errors='coerce') or 0
-                    unit_pt = pd.to_numeric(my_row.iloc[base_idx + OFFSET_UNIT_PT], errors='coerce') or 0
+                    # 【ここが変更点】
+                    # 1. 係数: 9行目 (coeff_df) の 同じ列 (col_idx) を参照
+                    unit_pt_val = coeff_df.iloc[0, col_idx]
+                    unit_pt = pd.to_numeric(unit_pt_val, errors='coerce') or 0
                     
-                    rank_rate_col_idx = base_idx + OFFSET_RATE
+                    # 2. 実績・目標・率: メインデータ (df) の 右隣の列 (+2, +5) を参照
+                    my_rate = pd.to_numeric(my_row.iloc[col_idx + OFFSET_RATE], errors='coerce') or 0
+                    my_target_vol = pd.to_numeric(my_row.iloc[col_idx + OFFSET_TARGET], errors='coerce') or 0
+                    
+                    # 3. 目標ランク平均率 (dfの右隣の列 +5)
+                    rank_rate_col_idx = col_idx + OFFSET_RATE
                     rank_avg_rate = target_rank_df.iloc[:, rank_rate_col_idx].apply(pd.to_numeric, errors='coerce').mean()
                     
                     target_rate = max(rank_avg_rate, my_rate)
                     rate_gap = target_rate - my_rate
                     
-                    if rate_gap > 0 and unit_pt > 0:
+                    # 係数が0でも、rate_gapがあればリストに入れる
+                    if rate_gap > 0:
                         needed_vol = (rate_gap / 100) * my_target_vol
                         needed_vol = math.ceil(needed_vol)
                         gain_pt = needed_vol * unit_pt
@@ -174,44 +187,64 @@ if uploaded_file is not None:
                             "daily_vol": daily_vol,
                             "unit_pt": unit_pt
                         })
-                except:
+                except Exception as e:
                     pass
 
+            # 獲得Ptが多い順にソート
             top_5_items = sorted(analysis_list, key=lambda x: x['gain_pt'], reverse=True)[:5]
 
-            # テーブル表示
-            h_cols = st.columns([2, 1.5, 1.5, 1.5, 1.5, 1.5])
-            h_cols[0].markdown("**項目名 (係数)**")
-            h_cols[1].markdown("**①現在率**")
-            h_cols[2].markdown(f"**②{target_rank}平均率**")
-            h_cols[3].markdown("**③獲得Pt**")
-            h_cols[4].markdown("**④不足数**")
-            h_cols[5].markdown(f"**⑤日割り(残{int(remaining_days)}日)**")
-
-            total_gain = 0
-            
-            for item in top_5_items:
-                cols = st.columns([2, 1.5, 1.5, 1.5, 1.5, 1.5])
-                
-                cols[0].markdown(f"**{item['name']}** <small>(Pt:{int(item['unit_pt'])})</small>", unsafe_allow_html=True)
-                cols[1].write(f"{item['current_rate']:.1f}%")
-                cols[2].write(f"{item['target_rate']:.1f}%")
-                cols[3].markdown(f":red[**+ {int(item['gain_pt']):,}**]")
-                cols[4].write(f"{int(item['needed_vol']):,} 件")
-                cols[5].write(f"**{item['daily_vol']:.1f}** 件/日")
-                
-                total_gain += item['gain_pt']
-                st.divider()
-
-            st.markdown("### 📝 シミュレーション結果")
-            c_final1, c_final2 = st.columns(2)
-            c_final1.metric("目標までの不足分", f"{int(gap):,} pt")
-            
-            remaining_gap = gap - total_gain
-            if remaining_gap <= 0:
-                c_final2.success(f"この5項目で + {int(total_gain):,} pt 獲得し、目標達成可能です！")
+            if not top_5_items:
+                st.warning("改善可能な項目が見つかりませんでした。（すべての項目で平均を上回っています）")
             else:
-                c_final2.warning(f"5項目で + {int(total_gain):,} pt ですが、まだ {int(remaining_gap):,} pt 足りません。")
+                # テーブル表示
+                h_cols = st.columns([2, 1.5, 1.5, 1.5, 1.5, 1.5])
+                h_cols[0].markdown("**項目名 (係数)**")
+                h_cols[1].markdown("**①現在率**")
+                h_cols[2].markdown(f"**②{target_rank}平均率**")
+                h_cols[3].markdown("**③獲得Pt**")
+                h_cols[4].markdown("**④不足数**")
+                h_cols[5].markdown(f"**⑤日割り(残{int(remaining_days)}日)**")
+
+                total_gain = 0
+                
+                for item in top_5_items:
+                    cols = st.columns([2, 1.5, 1.5, 1.5, 1.5, 1.5])
+                    
+                    # 係数が0の場合は警告色
+                    pt_val = int(item['unit_pt'])
+                    pt_display = f"{pt_val}"
+                    if pt_val == 0:
+                         pt_display = "⚠️0 (設定確認)"
+                    
+                    cols[0].markdown(f"**{item['name']}** <br><small>係数: {pt_display}</small>", unsafe_allow_html=True)
+                    cols[1].write(f"{item['current_rate']:.1f}%")
+                    cols[2].write(f"{item['target_rate']:.1f}%")
+                    
+                    # 獲得Pt
+                    gain_disp = f"+ {int(item['gain_pt']):,}"
+                    if pt_val == 0:
+                        cols[3].write(gain_disp)
+                    else:
+                        cols[3].markdown(f":red[**{gain_disp}**]")
+                        
+                    cols[4].write(f"{int(item['needed_vol']):,} 件")
+                    cols[5].write(f"**{item['daily_vol']:.1f}** 件/日")
+                    
+                    total_gain += item['gain_pt']
+                    st.divider()
+
+                st.markdown("### 📝 シミュレーション結果")
+                c_final1, c_final2 = st.columns(2)
+                c_final1.metric("目標までの不足分", f"{int(gap):,} pt")
+                
+                remaining_gap = gap - total_gain
+                
+                if total_gain == 0 and len(top_5_items) > 0:
+                     c_final2.warning("獲得Ptが0になっています。9行目の係数が正しく読み込まれているか確認してください。")
+                elif remaining_gap <= 0:
+                    c_final2.success(f"この5項目で + {int(total_gain):,} pt 獲得し、目標達成可能です！")
+                else:
+                    c_final2.warning(f"5項目で + {int(total_gain):,} pt ですが、まだ {int(remaining_gap):,} pt 足りません。")
                 
         else:
             st.balloons()
