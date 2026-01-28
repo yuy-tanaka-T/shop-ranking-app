@@ -3,185 +3,191 @@ import pandas as pd
 import math
 
 # --- ページ設定 ---
-st.set_page_config(page_title="成果評価シミュレーター", layout="wide")
+st.set_page_config(page_title="店舗目標達成シミュレーター", layout="wide")
 
-st.title("🏆 成果評価シミュレーター")
-st.markdown("データがR列・S列・T列にあっても、読み込み位置を調整して分析できます。")
+st.title("🏆 店舗目標達成シミュレーター")
+st.markdown("全社平均と比較し、改善インパクトの大きい5項目を自動抽出して計画を立案します。")
 
-# --- 関数: ランクボーダー計算 ---
-def calculate_rank_borders(df_group, points_col):
-    sorted_df = df_group.sort_values(by=points_col, ascending=False).reset_index(drop=True)
-    total = len(sorted_df)
-    
-    if total == 0:
-        return {"S": 0, "A": 0, "B": 0}, sorted_df
+# --- 1. 固定設定（ここを変更すればデフォルトが変わります） ---
+DEFAULT_HEADER_ROW = 17      # Excelの17行目がタイトル
+COL_NAME_STORE = "部門名"     # R列相当
+COL_NAME_RANK = "Rank"       # S列相当
+COL_NAME_POINT = "総合ﾎﾟｲﾝﾄ"  # T列相当
 
-    s_limit = math.ceil(total * 0.20)
-    a_limit = math.ceil(total * 0.50)
-    b_limit = math.ceil(total * 0.80)
-    
-    borders = {
-        "S": sorted_df.iloc[s_limit - 1][points_col] if total > 0 else 0,
-        "A": sorted_df.iloc[a_limit - 1][points_col] if total > s_limit else 0,
-        "B": sorted_df.iloc[b_limit - 1][points_col] if total > a_limit else 0,
-    }
-    return borders, sorted_df
-
-# --- 1. データ読み込み設定エリア ---
-st.sidebar.header("📂 データ読み込み設定")
-uploaded_file = st.sidebar.file_uploader("Excel/CSVをアップロード", type=["xlsx", "xls", "csv"])
-
-# ヘッダー行の指定（重要！）
-header_row_idx = st.sidebar.number_input(
-    "表のタイトル（項目名）は何行目にありますか？", 
-    min_value=1, 
-    value=1, 
-    help="Excelの1行目が空白で、5行目から表が始まる場合などはここを『5』にしてください"
-) - 1  # プログラム用に行番号を補正
+# --- 2. データ読み込み ---
+uploaded_file = st.sidebar.file_uploader("ランキングデータ（Excel）をアップロード", type=["xlsx", "xls", "csv"])
 
 if uploaded_file is not None:
     try:
-        # --- ファイル読み込み ---
+        # ヘッダー行を指定して読み込み（Pythonは0始まりなので -1）
+        header_idx = DEFAULT_HEADER_ROW - 1
+        
         if uploaded_file.name.endswith('.csv'):
-            df = pd.read_csv(uploaded_file, header=header_row_idx)
-        elif uploaded_file.name.endswith('.xlsx'):
-            df = pd.read_excel(uploaded_file, engine='openpyxl', header=header_row_idx)
+            df = pd.read_csv(uploaded_file, header=header_idx)
         else:
-            df = pd.read_excel(uploaded_file, header=header_row_idx)
+            df = pd.read_excel(uploaded_file, header=header_idx)
         
-        # 空白列（Unnamed）の削除とデータのクリーニング
-        df = df.loc[:, ~df.columns.str.contains('^Unnamed')]  # 列名がない列を削除
-        df = df.dropna(how='all', axis=1) # 中身が空の列を削除
+        # 必要な列が存在するかチェック
+        missing_cols = []
+        for c in [COL_NAME_STORE, COL_NAME_RANK, COL_NAME_POINT]:
+            if c not in df.columns:
+                missing_cols.append(c)
         
-        st.toast(f"データを読み込みました！ ({len(df)}行)")
-
-        # --- 2. 列の割り当て（マッピング） ---
-        st.sidebar.markdown("---")
-        st.sidebar.header("⚙️ 列の指定")
-        st.sidebar.info("R, S, T列に相当する項目名を選んでください")
-        
-        cols = df.columns.tolist()
-        
-        # もし列が見つからない場合の救済措置
-        if len(cols) < 3:
-            st.error("有効な列が見つかりません。「表のタイトル行」の数値を変更してみてください。")
+        if missing_cols:
+            st.error(f"エラー: Excelの中に以下の列名が見つかりません。\n{missing_cols}")
+            st.info(f"Excelの{DEFAULT_HEADER_ROW}行目に正確にこの名前が入っているか確認してください。")
             st.stop()
 
-        # 列選択（デフォルト値を自動推定）
-        # R列：店舗名
-        idx_store = next((i for i, c in enumerate(cols) if "店舗" in str(c) or "店名" in str(c)), 0)
-        col_store = st.sidebar.selectbox("「店舗名」の列 (R列相当)", cols, index=idx_store)
+        # データ型変換とクリーニング
+        df[COL_NAME_STORE] = df[COL_NAME_STORE].astype(str).str.strip()
+        df[COL_NAME_POINT] = pd.to_numeric(df[COL_NAME_POINT], errors='coerce').fillna(0)
         
-        # S列：ランク（クラスタ）
-        idx_cluster = next((i for i, c in enumerate(cols) if "ランク" in str(c) or "クラスタ" in str(c)), 1 if len(cols)>1 else 0)
-        col_cluster = st.sidebar.selectbox("「ランク/クラスタ」の列 (S列相当)", cols, index=idx_cluster)
+        # 不要な列（空白など）を削除
+        df = df.dropna(how='all', axis=1)
+
+        st.toast(f"✅ 読み込み完了: 全 {len(df)} 店舗")
+
+        # --- 3. 分析エンジンの準備 ---
         
-        # T列：総合ポイント
-        idx_points = next((i for i, c in enumerate(cols) if "ポイント" in str(c) or "点" in str(c) or "総合" in str(c)), 2 if len(cols)>2 else 0)
-        col_points = st.sidebar.selectbox("「総合ポイント」の列 (T列相当)", cols, index=idx_points)
+        # 全社平均（Average）の計算
+        # 数値列だけを抽出して平均を出す
+        numeric_df = df.select_dtypes(include=['number'])
+        avg_series = numeric_df.mean()
 
-        # データ型変換（文字列の空白除去と数値化）
-        df[col_store] = df[col_store].astype(str).str.strip()  # 店舗名の前後の空白を削除
-        df[col_cluster] = df[col_cluster].astype(str).str.strip() # ランクの空白削除
-        df[col_points] = pd.to_numeric(df[col_points], errors='coerce').fillna(0) # ポイントを数値化
-
-        # --- 3. グループ分け ---
-        def classify_group(cluster):
-            cluster = str(cluster).upper().strip()
-            # データの「S, A, B」などを判定
-            if cluster in ['S', 'A', 'B', '大型']: return '大型店'
-            elif cluster in ['C', 'D', '中型']: return '中型店'
-            elif cluster in ['E', 'F', '小型']: return '小型店'
-            return 'その他'
-
-        df['分析グループ'] = df[col_cluster].apply(classify_group)
-
-        # --- 4. 店舗選択と分析 ---
+        # --- 4. 店舗選択 ---
         st.markdown("---")
+        stores_list = sorted(df[COL_NAME_STORE].unique().tolist())
         
-        # 店舗リスト作成（ソートして探しやすく）
-        stores_list = sorted(df[col_store].unique().tolist())
+        # サイドバーでなくメイン画面で選択
+        col_sel_1, col_sel_2 = st.columns([1, 2])
+        with col_sel_1:
+            selected_store = st.selectbox("📍 分析する店舗を選択", stores_list)
         
-        col_main_1, col_main_2 = st.columns([1, 2])
-        
-        with col_main_1:
-            selected_store_name = st.selectbox("📍 分析する店舗を選択", stores_list)
-        
-        # データ抽出（エラー回避ロジック入り）
-        my_data_rows = df[df[col_store] == selected_store_name]
-        
-        if my_data_rows.empty:
-            st.error("選択された店舗のデータが見つかりません。")
-            st.stop()
-            
-        my_data = my_data_rows.iloc[0]
-        my_group = my_data['分析グループ']
-        my_points = my_data[col_points]
+        # 自店舗データ抽出
+        my_data = df[df[COL_NAME_STORE] == selected_store].iloc[0]
+        my_point = my_data[COL_NAME_POINT]
+        my_rank = my_data[COL_NAME_RANK]
 
-        # ランキング計算
-        group_df = df[df['分析グループ'] == my_group].copy()
-        borders, ranked_df = calculate_rank_borders(group_df, col_points)
+        # --- 5. 目標設定とギャップ ---
         
-        # 順位取得
-        try:
-            my_rank = ranked_df[ranked_df[col_store] == selected_store_name].index[0] + 1
-        except:
-            my_rank = "-"
+        # 所属ランクのボーダー算出
+        # Rank列のデータを使って、同じランク、一つ上のランクのポイントを探るロジックも可能ですが
+        # ここではシンプルに「目標ポイント」を入力または自動計算させます
         
-        total_in_group = len(ranked_df)
+        with col_sel_2:
+            st.info(f"店舗名: **{selected_store}**")
+            c1, c2 = st.columns(2)
+            c1.metric("現在のランク", f"{my_rank}")
+            c2.metric("現在の総合ポイント", f"{int(my_point):,} pt")
 
-        # 結果表示
-        with col_main_2:
-            st.info(f"**{selected_store_name}** （{my_group} / {my_data[col_cluster]}ランク）")
-            m1, m2, m3 = st.columns(3)
-            m1.metric("現在ポイント", f"{int(my_points):,} pt")
-            m2.metric("グループ順位", f"{my_rank}位")
-            m3.metric("母数", f"{total_in_group} 店舗")
-
-        # --- 5. 目標シミュレーション ---
-        st.markdown("### 🎯 目標達成シミュレーション")
+        st.markdown("### 🎯 目標設定")
         
-        # 目標ランク選択
-        target_rank = st.radio("目指すランク", ["S", "A", "B"], horizontal=True)
-        target_pt = borders.get(target_rank, 0)
-        gap = target_pt - my_points
+        # 簡易的に目標ポイントを設定（デフォルトは今の1.1倍）
+        target_point = st.number_input("目標とする総合ポイントを入力", value=int(my_point * 1.1))
+        gap = target_point - my_point
 
-        # ギャップ表示
-        if gap > 0:
-            st.warning(f"あと **{int(gap):,} pt** 必要です（ボーダー: {int(target_pt):,} pt）")
-            
-            st.markdown("#### 🛠 具体的なアクションプラン")
-            
-            with st.expander("詳細プランニングを開く", expanded=True):
-                # 案① パワープレイ
-                st.markdown("**① 件数で稼ぐ (Power Play)**")
-                c_p1, c_p2 = st.columns(2)
-                with c_p1:
-                    item1 = st.text_input("商材名1", "SB機変")
-                    pt1 = st.number_input(f"{item1} のポイント", value=8.0)
-                    if pt1 > 0:
-                        st.markdown(f"👉 あと **{math.ceil(gap/pt1)} 件**")
-                
-                with c_p2:
-                    item2 = st.text_input("商材名2", "Y→S")
-                    pt2 = st.number_input(f"{item2} のポイント", value=5.0)
-                    if pt2 > 0:
-                        st.markdown(f"👉 あと **{math.ceil(gap/pt2)} 件**")
-
+        if gap <= 0:
+            st.success("🎉 目標達成済みです！")
         else:
-            st.success(f"🎉 {target_rank}ランク 達成圏内です！（+ {abs(int(gap))} pt 余裕あり）")
-            # 次のランクがあれば表示
-            if target_rank == "B":
-                 st.caption(f"次はAランク（{int(borders['A']):,} pt）を目指しましょう！")
-            elif target_rank == "A":
-                 st.caption(f"次はSランク（{int(borders['S']):,} pt）を目指しましょう！")
+            st.warning(f"目標まであと **{int(gap):,} pt** 必要です。")
+            
+            # --- 6. 弱点分析とアクションプラン (AI分析) ---
+            st.markdown("---")
+            st.subheader("📊 重点改善 5項目 (対平均 乖離分析)")
+            st.markdown("全社の平均値と比較して、**伸びしろ（乖離）が大きいワースト5項目**を自動抽出しました。")
 
-        # データ確認用
-        with st.expander("📊 ランキング表を確認"):
-            st.dataframe(ranked_df[[col_store, col_cluster, col_points]])
+            # 乖離の計算ロジック
+            # (自店 - 平均) がマイナスの項目を探す
+            diff_dict = {}
+            
+            # 除外する列（ポイントそのものや、意味のない数値列）
+            exclude_cols = [COL_NAME_POINT, '順位', 'No', 'No.', 'row', 'id']
+            
+            for col in numeric_df.columns:
+                if col in exclude_cols:
+                    continue
+                
+                # 自店の値
+                val_store = my_data[col]
+                # 全社平均
+                val_avg = avg_series[col]
+                
+                # 平均が0より大きい場合のみ計算
+                if val_avg > 0:
+                    # 達成率 (自店 / 平均)
+                    achievement_rate = (val_store / val_avg) * 100
+                    
+                    # 乖離ポイント（単純な数値差分ではなく、達成率の低さを重視）
+                    if achievement_rate < 100:
+                        diff_dict[col] = achievement_rate
+
+            # 達成率が低い順（ワースト順）にソートしてトップ5を抽出
+            worst_5_items = sorted(diff_dict.items(), key=lambda x: x[1])[:5]
+
+            # --- アクションプランテーブルの作成 ---
+            
+            st.markdown(f"**残り営業日数で、この5項目をどう埋めますか？**")
+            
+            # テーブルヘッダー
+            h1, h2, h3, h4, h5 = st.columns([2, 1.5, 1.5, 2, 2])
+            h1.markdown("**項目名**")
+            h2.markdown("**現状 / 平均**")
+            h3.markdown("**対平均達成率**")
+            h4.markdown("**計画 (月末までの獲得)**")
+            h5.markdown("**獲得見込みポイント**")
+
+            total_plan_points = 0
+
+            for item_name, rate in worst_5_items:
+                current_val = my_data[item_name]
+                avg_val = avg_series[item_name]
+                
+                with st.container():
+                    c1, c2, c3, c4, c5 = st.columns([2, 1.5, 1.5, 2, 2])
+                    
+                    # 1. 項目名
+                    c1.markdown(f"**{item_name}**")
+                    
+                    # 2. 現状/平均
+                    c2.caption(f"{current_val:,.1f} / {avg_val:,.1f}")
+                    
+                    # 3. 達成率 (赤字で強調)
+                    c3.markdown(f":red[**{rate:.1f}%**]")
+                    
+                    # 4. 計画入力
+                    # ポイント係数がExcelにないので、ユーザーに入力してもらうか、ここで仮定する必要があります
+                    # ここでは「1件あたりのポイント」を入力させる欄を作ります
+                    with c4:
+                        col_input_1, col_input_2 = st.columns(2)
+                        target_num = col_input_1.number_input(f"獲得数", key=f"num_{item_name}", min_value=0, value=1)
+                        points_per_unit = col_input_2.number_input(f"係数", key=f"coef_{item_name}", value=100, help="この項目の1件あたりのポイント")
+                    
+                    # 5. 結果計算
+                    plan_points = target_num * points_per_unit
+                    c5.metric("加算Pt", f"+ {int(plan_points):,}")
+                    
+                    total_plan_points += plan_points
+                    st.divider()
+
+            # --- 合計結果 ---
+            st.markdown("### 📝 計画まとめ")
+            
+            col_res_1, col_res_2 = st.columns(2)
+            
+            with col_res_1:
+                st.metric("目標までのギャップ", f"{int(gap):,} pt")
+            
+            with col_res_2:
+                if total_plan_points >= gap:
+                    st.success(f"見込み合計: + {int(total_plan_points):,} pt (達成！)")
+                else:
+                    remaining = gap - total_plan_points
+                    st.error(f"見込み合計: + {int(total_plan_points):,} pt (あと {int(remaining):,} pt 不足)")
 
     except Exception as e:
-        st.error("エラーが発生しました。設定を確認してください。")
-        st.code(e)
+        st.error("エラーが発生しました。")
+        st.write("詳細:", e)
+        st.warning("Excelの17行目に『部門名』『Rank』『総合ﾎﾟｲﾝﾄ』という列名があるか確認してください。")
+
 else:
-    st.info("👈 左側のサイドバーからファイルをアップロードしてください。")
+    st.info("👈 左側のサイドバーからExcelファイルをアップロードしてください。")
