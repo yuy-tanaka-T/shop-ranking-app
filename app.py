@@ -157,28 +157,37 @@ if uploaded_file is not None:
                     my_target_vol = pd.to_numeric(my_row.iloc[col_idx + OFFSET_TARGET], errors='coerce') or 0
                     my_rate = pd.to_numeric(my_row.iloc[col_idx + OFFSET_RATE], errors='coerce') or 0
                     
-                    # --- 計算ロジック ---
+                    # --- 計算ロジック修正 ---
+                    
+                    # 達成率の単位自動判定 (1.59 vs 159)
+                    # 平均が5.0(500%)を超えることは稀なので、5以上なら%表記(整数)とみなす
                     is_percentage_integer = (company_avg_rate > 5) 
                     
-                    # 表示用の率 (%)
-                    disp_my_rate = my_rate if is_percentage_integer else my_rate * 100
-                    disp_avg_rate = company_avg_rate if is_percentage_integer else company_avg_rate * 100
+                    # 計算用変数（表示用: %, 計算用: %差分）
+                    if is_percentage_integer:
+                        disp_my_rate = my_rate
+                        disp_avg_rate = company_avg_rate
+                    else:
+                        disp_my_rate = my_rate * 100
+                        disp_avg_rate = company_avg_rate * 100
                     
-                    # 修正ロジック: ①(現在率)から②(平均率)に上がった差分 × 係数
-                    # つまり「達成率のギャップ」に基づいて不足分を計算する
+                    # 差分（ギャップ）
                     rate_diff = disp_avg_rate - disp_my_rate
                     
                     if rate_diff > 0:
-                        # 不足数 = 率差分(%) / 100 * 目標
-                        needed_vol = (rate_diff / 100) * my_target_vol
+                        # ★ここを変更: ④向上Pt = 差分(%) × 係数
+                        # 例: 差分10.2(%) × 係数3 = 30.6 pt
+                        gain_pt = rate_diff * unit_pt
+                        
+                        # ③不足数 (参考値として計算)
+                        # 目標 × (差分%/100)
+                        needed_vol = my_target_vol * (rate_diff / 100)
                         needed_vol = math.ceil(needed_vol)
                         
-                        gain_pt = needed_vol * unit_pt
                         daily_vol = needed_vol / remaining_days
 
-                        # 単位判定 (売上なら円)
+                        # 単位判定
                         unit_label = "円" if "売上" in item_name else "件"
-                        daily_unit_label = "円" if "売上" in item_name else "件"
 
                         analysis_list.append({
                             "name": item_name,
@@ -194,6 +203,7 @@ if uploaded_file is not None:
                 except Exception as e:
                     pass
 
+            # 向上Pt順にソート
             top_5_items = sorted(analysis_list, key=lambda x: x['gain_pt'], reverse=True)[:5]
 
             if not top_5_items:
@@ -219,11 +229,12 @@ if uploaded_file is not None:
                     cols[1].write(f"{item['current_rate']:.1f}%")
                     cols[2].write(f"{item['target_rate']:.1f}%")
                     
-                    # ③不足数
+                    # ③不足数 (円の場合はカンマ区切り)
                     cols[3].write(f"{int(item['needed_vol']):,} {item['unit_label']}")
                     
                     # ④向上Pt
-                    gain_disp = f"+ {int(item['gain_pt']):,}"
+                    # 小数点を含む可能性があるため .1f
+                    gain_disp = f"+ {item['gain_pt']:,.1f}"
                     if pt_val == 0: cols[4].write(gain_disp)
                     else: cols[4].markdown(f":red[**{gain_disp}**]")
                         
@@ -252,6 +263,7 @@ if uploaded_file is not None:
 
 else:
     st.info("👈 サイドバーからExcelファイルをアップロードしてください。")
+
 
 
 
