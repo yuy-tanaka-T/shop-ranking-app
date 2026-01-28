@@ -12,7 +12,7 @@ st.markdown("全社平均と比較し、改善インパクトの大きい5項目
 DEFAULT_HEADER_ROW = 17      # Excelの17行目がタイトル
 COL_NAME_STORE = "部門名"     # R列相当
 COL_NAME_RANK = "Rank"       # S列相当
-COL_NAME_POINT = "総合ﾎﾟｲﾝﾄ"  # T列相当
+COL_NAME_POINT = "総合P"      # T列相当 (ここを変更しました！)
 
 # --- 2. データ読み込み ---
 uploaded_file = st.sidebar.file_uploader("ランキングデータ（Excel）をアップロード", type=["xlsx", "xls", "csv"])
@@ -70,10 +70,6 @@ if uploaded_file is not None:
 
         # --- 5. 目標設定とギャップ ---
         
-        # 所属ランクのボーダー算出
-        # Rank列のデータを使って、同じランク、一つ上のランクのポイントを探るロジックも可能ですが
-        # ここではシンプルに「目標ポイント」を入力または自動計算させます
-        
         with col_sel_2:
             st.info(f"店舗名: **{selected_store}**")
             c1, c2 = st.columns(2)
@@ -97,7 +93,6 @@ if uploaded_file is not None:
             st.markdown("全社の平均値と比較して、**伸びしろ（乖離）が大きいワースト5項目**を自動抽出しました。")
 
             # 乖離の計算ロジック
-            # (自店 - 平均) がマイナスの項目を探す
             diff_dict = {}
             
             # 除外する列（ポイントそのものや、意味のない数値列）
@@ -155,8 +150,6 @@ if uploaded_file is not None:
                     c3.markdown(f":red[**{rate:.1f}%**]")
                     
                     # 4. 計画入力
-                    # ポイント係数がExcelにないので、ユーザーに入力してもらうか、ここで仮定する必要があります
-                    # ここでは「1件あたりのポイント」を入力させる欄を作ります
                     with c4:
                         col_input_1, col_input_2 = st.columns(2)
                         target_num = col_input_1.number_input(f"獲得数", key=f"num_{item_name}", min_value=0, value=1)
@@ -187,7 +180,7 @@ if uploaded_file is not None:
     except Exception as e:
         st.error("エラーが発生しました。")
         st.write("詳細:", e)
-        st.warning("Excelの17行目に『部門名』『Rank』『総合ﾎﾟｲﾝﾄ』という列名があるか確認してください。")
+        st.warning(f"Excelの{DEFAULT_HEADER_ROW}行目に『部門名』『Rank』『{COL_NAME_POINT}』という列名があるか確認してください。")
 
 else:
     st.info("👈 左側のサイドバーからExcelファイルをアップロードしてください。")
