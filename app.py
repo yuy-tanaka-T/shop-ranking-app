@@ -141,8 +141,8 @@ if uploaded_file is not None:
         # --- 4. 弱点分析＆アクションプラン ---
         if gap > 0:
             st.markdown("---")
-            st.subheader("📊 平均比改善 重点 5項目")
-            st.markdown("全社平均達成率（11行目）を下回っている項目を抽出します。")
+            st.subheader("📊 向上注力5項目")
+            st.markdown("全社平均達成率（11行目）をもとに、平均基準まで引き上げるために必要な件数と向上Ptを算出します。")
 
             analysis_list = []
             debug_data = []
@@ -153,41 +153,39 @@ if uploaded_file is not None:
                     unit_pt_val = meta_df.iloc[ROW_IDX_COEFF, col_idx]
                     unit_pt = pd.to_numeric(unit_pt_val, errors='coerce') or 0
                     
-                    # 2. 全社平均 (11行目, 達成率列 = 項目列 + 5)
+                    # 2. 全社平均 (11行目)
                     avg_rate_col_idx = col_idx + OFFSET_RATE
                     avg_rate_val = meta_df.iloc[ROW_IDX_AVG, avg_rate_col_idx]
                     company_avg_rate = pd.to_numeric(avg_rate_val, errors='coerce') or 0
 
-                    # 3. 自店データ (データ行, 達成率列 = 項目列 + 5)
-                    my_rate = pd.to_numeric(my_row.iloc[col_idx + OFFSET_RATE], errors='coerce') or 0
+                    # 3. 自店データ (目標、実績、達成率)
                     my_target_vol = pd.to_numeric(my_row.iloc[col_idx + OFFSET_TARGET], errors='coerce') or 0
+                    my_actual_vol = pd.to_numeric(my_row.iloc[col_idx + OFFSET_ACTUAL], errors='coerce') or 0
+                    my_rate = pd.to_numeric(my_row.iloc[col_idx + OFFSET_RATE], errors='coerce') or 0
                     
-                    # 4. ギャップ計算（単位自動判定）
-                    rate_gap = company_avg_rate - my_rate
+                    # --- 計算ロジック変更箇所 ---
                     
-                    # 【重要修正】データが「91」なのか「0.91」なのかで計算を変える
-                    # 平均値が 2.0 (200%) を超える場合は「整数(%)」とみなす、それ以下は「小数」とみなす
+                    # 達成率の単位自動判定 (1.59 vs 159)
                     is_percentage_integer = (company_avg_rate > 5) 
                     
-                    # 表示用の補正（%表示のため）
+                    # 計算用の平均率 (小数に統一)
+                    calc_avg_rate = company_avg_rate / 100 if is_percentage_integer else company_avg_rate
+
+                    # 表示用の率 (%)
                     disp_my_rate = my_rate if is_percentage_integer else my_rate * 100
                     disp_avg_rate = company_avg_rate if is_percentage_integer else company_avg_rate * 100
                     
-                    debug_data.append({
-                        "項目": item_name,
-                        "自店(生)": my_rate,
-                        "平均(生)": company_avg_rate,
-                        "目標": my_target_vol,
-                        "係数": unit_pt
-                    })
-
-                    if rate_gap > 0:
-                        # 整数(91)なら 100で割る、小数(0.91)なら そのまま差分を使う
-                        factor = (rate_gap / 100) if is_percentage_integer else rate_gap
-                        
-                        needed_vol = factor * my_target_vol
-                        needed_vol = math.ceil(needed_vol)
-                        
+                    # 新ロジック: (目標 × 全社Av) - 実績 = 不足数
+                    # 例: 179 * 1.59 = 284.6 -> 285 (理想) - 153 (実績) = 132 (不足)
+                    
+                    ideal_vol = my_target_vol * calc_avg_rate
+                    needed_vol = ideal_vol - my_actual_vol
+                    
+                    # 整数に切り上げ (不足数が小数になるのを防ぐ)
+                    needed_vol = math.ceil(needed_vol)
+                    
+                    # 不足数がプラスの場合のみリストに追加
+                    if needed_vol > 0:
                         gain_pt = needed_vol * unit_pt
                         daily_vol = needed_vol / remaining_days
 
@@ -200,23 +198,34 @@ if uploaded_file is not None:
                             "daily_vol": daily_vol,
                             "unit_pt": unit_pt
                         })
+
+                    # デバッグ用
+                    debug_data.append({
+                        "項目": item_name,
+                        "目標": my_target_vol,
+                        "全社Av(率)": f"{disp_avg_rate:.1f}%",
+                        "理想件数": f"{ideal_vol:.1f}",
+                        "実績": my_actual_vol,
+                        "不足数": needed_vol
+                    })
+
                 except Exception as e:
                     pass
 
             top_5_items = sorted(analysis_list, key=lambda x: x['gain_pt'], reverse=True)[:5]
 
             if not top_5_items:
-                st.warning("平均を下回っている項目はありません。")
+                st.warning("全社平均を下回っている項目はありません。")
                 with st.expander("詳細デバッグ"):
                     st.dataframe(pd.DataFrame(debug_data))
             else:
-                # テーブル表示
+                # テーブル表示 (配置変更: ③不足数, ④向上Pt)
                 h_cols = st.columns([2, 1.5, 1.5, 1.5, 1.5, 1.5])
                 h_cols[0].markdown("**項目名 (係数)**")
                 h_cols[1].markdown("**①現在率**")
                 h_cols[2].markdown("**②全社平均**")
-                h_cols[3].markdown("**③獲得Pt**")
-                h_cols[4].markdown("**④不足数**")
+                h_cols[3].markdown("**③不足数**") # ここを変更
+                h_cols[4].markdown("**④向上Pt**") # ここを変更
                 h_cols[5].markdown(f"**⑤日割り(残{int(remaining_days)}日)**")
 
                 total_gain = 0
@@ -230,12 +239,17 @@ if uploaded_file is not None:
                     cols[1].write(f"{item['current_rate']:.1f}%")
                     cols[2].write(f"{item['target_rate']:.1f}%")
                     
+                    # ③不足数
+                    cols[3].write(f"{int(item['needed_vol']):,} 件")
+                    
+                    # ④向上Pt
                     gain_disp = f"+ {int(item['gain_pt']):,}"
-                    if pt_val == 0: cols[3].write(gain_disp)
-                    else: cols[3].markdown(f":red[**{gain_disp}**]")
+                    if pt_val == 0: cols[4].write(gain_disp)
+                    else: cols[4].markdown(f":red[**{gain_disp}**]")
                         
-                    cols[4].write(f"{int(item['needed_vol']):,} 件")
+                    # ⑤日割り
                     cols[5].write(f"**{item['daily_vol']:.1f}** 件/日")
+                    
                     total_gain += item['gain_pt']
                     st.divider()
 
@@ -249,6 +263,9 @@ if uploaded_file is not None:
                 else:
                     c_final2.warning(f"平均並みに改善で + {int(total_gain):,} pt ですが、まだ {int(remaining_gap):,} pt 不足。")
 
+            with st.expander("🛠 計算データ確認（デバッグ用）"):
+                st.dataframe(pd.DataFrame(debug_data))
+                
         else:
             st.balloons()
             st.success("現在、目標ランクの平均値を上回っています！")
@@ -258,4 +275,5 @@ if uploaded_file is not None:
 
 else:
     st.info("👈 サイドバーからExcelファイルをアップロードしてください。")
+
 
