@@ -8,7 +8,10 @@ import re
 # --- ページ設定 ---
 st.set_page_config(page_title="店舗目標達成シミュレーター", layout="wide")
 st.title("🏆 店舗目標達成シミュレーター")
-st.markdown("C13セルの日付基準で残り日数を自動計算し、目標ランク達成のためのアクションプランを提示します。")
+st.markdown("C13の日付で残り日数を計算し、**全社平均(11行目)**と比較して不足分を埋めるアクションプランを提示します。")
+
+# --- 設定: 読み込むシート名 ---
+SHEET_NAME = "総合Ranking_達成率"
 
 # --- 設定: 表示する店舗リスト（指定） ---
 ALLOWED_STORES = [
@@ -26,21 +29,21 @@ TARGET_ITEM_NAMES = [
 ]
 
 # 列の相対位置（項目名の列=0とした場合）
-# 右に 順位・目標・実績・着地・達成率 が並んでいる
-OFFSET_RANK_VAL = 1  # 順位
 OFFSET_TARGET = 2    # 目標
 OFFSET_ACTUAL = 3    # 実績
-OFFSET_LANDING = 4   # 着地
 OFFSET_RATE = 5      # 達成率
 
-# 固定位置情報（Excelの行列）
-COEFF_ROW_NUM = 9   # 係数が記載されている行（9行目）
-HEADER_ROW_NUM = 17 # ヘッダー行（17行目）
+# 固定位置情報（Excelの行列・0始まりのインデックス）
+ROW_IDX_COEFF = 8    # 9行目（係数）
+ROW_IDX_AVG = 10     # 11行目（全社平均）
+ROW_IDX_DATE = 12    # 13行目（日付）
+ROW_IDX_HEADER = 16  # 17行目（ヘッダー）
+
 COL_IDX_STORE = 17  # R列
 COL_IDX_RANK = 18   # S列
 COL_IDX_TOTAL = 19  # T列
 
-# --- 1. データ読み込みと日付判定 ---
+# --- 1. データ読み込み ---
 st.sidebar.header("⚙️ 設定")
 uploaded_file = st.sidebar.file_uploader("ランキングデータ（Excel）", type=["xlsx", "xls"])
 
@@ -48,11 +51,17 @@ remaining_days = 1 # 初期値
 
 if uploaded_file is not None:
     try:
-        # --- A. 日付の取得 (C13セル) ---
+        # --- A. メタデータ読み込み（上部17行分） ---
+        # シートを指定して、ヘッダーなしで上部だけ読む
         try:
-            date_df = pd.read_excel(uploaded_file, header=None, usecols="C", skiprows=12, nrows=1)
-            raw_text = str(date_df.iloc[0, 0])
-            
+            meta_df = pd.read_excel(uploaded_file, sheet_name=SHEET_NAME, header=None, nrows=17)
+        except ValueError:
+            st.error(f"エラー: シート名「{SHEET_NAME}」が見つかりません。Excelのシート名を確認してください。")
+            st.stop()
+
+        # 1. 日付の取得 (C13 = 行12, 列2)
+        try:
+            raw_text = str(meta_df.iloc[ROW_IDX_DATE, 2]) # C列=index 2
             match = re.search(r'(\d{4}[-/]\d{1,2}[-/]\d{1,2})', raw_text)
             
             if match:
@@ -63,34 +72,33 @@ if uploaded_file is not None:
                     last_day = calendar.monthrange(base_date.year, base_date.month)[1]
                     calc_days = max(1, last_day - base_date.day)
                     st.sidebar.success(f"📅 基準日: {base_date.strftime('%Y/%m/%d')}")
-                    remaining_days = st.sidebar.number_input("今月の残り日数", min_value=1, value=calc_days, help="C13セルの日付から自動計算")
+                    remaining_days = st.sidebar.number_input("今月の残り日数", min_value=1, value=calc_days)
                 else:
-                    raise ValueError("日付変換失敗")
+                    raise ValueError
             else:
-                st.sidebar.warning(f"C13セルから日付が見つかりませんでした。")
-                remaining_days = st.sidebar.number_input("今月の残り日数", min_value=1, value=10)
-
-        except Exception as e:
-            st.sidebar.error(f"日付読み取りエラー: {e}")
+                raise ValueError
+        except:
+            st.sidebar.warning("C13セルから日付を読み取れませんでした。")
             remaining_days = st.sidebar.number_input("今月の残り日数", min_value=1, value=10)
 
-        # ファイルポインタを戻す
-        uploaded_file.seek(0)
+        # 2. 係数行(9行目)と平均行(11行目)の確保
+        coeff_row = meta_df.iloc[ROW_IDX_COEFF]
+        avg_row = meta_df.iloc[ROW_IDX_AVG]
 
-        # --- B. 係数行（9行目）の読み込み ---
-        # 9行目だけを読み込み（列位置の基準とするため、ヘッダーなしで読む）
-        coeff_df = pd.read_excel(uploaded_file, header=None, skiprows=COEFF_ROW_NUM - 1, nrows=1)
+        # --- B. メインデータの読み込み ---
+        uploaded_file.seek(0)
+        df = pd.read_excel(uploaded_file, sheet_name=SHEET_NAME, header=ROW_IDX_HEADER)
         
-        uploaded_file.seek(0)
-
-        # --- C. メインデータの読み込み（17行目ヘッダー） ---
-        df = pd.read_excel(uploaded_file, header=HEADER_ROW_NUM - 1)
+        # 列名の空白除去
         df.columns = df.columns.astype(str).str.strip().str.replace('　', '')
 
         # 基本情報の抽出
         col_name_store = df.columns[COL_IDX_STORE]
         
+        # 店舗名がない行を削除
         df = df.dropna(subset=[col_name_store])
+        
+        # 数値化処理
         df.iloc[:, COL_IDX_TOTAL] = pd.to_numeric(df.iloc[:, COL_IDX_TOTAL], errors='coerce').fillna(0)
         df.iloc[:, COL_IDX_RANK] = df.iloc[:, COL_IDX_RANK].astype(str).str.strip()
 
@@ -129,6 +137,7 @@ if uploaded_file is not None:
             st.markdown("##### 🎯 目標ランク設定")
             target_rank = st.selectbox("目指すランクを選択してください", unique_ranks, index=0)
             
+            # 目標ランクの平均Pt計算
             target_rank_df = df[df.iloc[:, COL_IDX_RANK] == target_rank]
             if len(target_rank_df) > 0:
                 target_avg_pt = target_rank_df.iloc[:, COL_IDX_TOTAL].mean()
@@ -148,40 +157,43 @@ if uploaded_file is not None:
         # --- 4. 弱点分析＆アクションプラン ---
         if gap > 0:
             st.markdown("---")
-            st.subheader(f"📊 {target_rank}ランク平均に追いつくための重点 5項目")
-            st.markdown(f"目標ランク（{target_rank}）の平均達成率に届いていない項目を抽出し、**目標率に到達した場合のポイント増**を試算します。")
+            st.subheader("📊 平均比改善 重点 5項目")
+            st.markdown("全社平均達成率（11行目）を下回っている項目を抽出し、平均並みに改善した場合の獲得ポイントを試算します。")
 
             analysis_list = []
 
             for item_name, col_idx in found_items.items():
                 try:
-                    # 【ここが変更点】
-                    # 1. 係数: 9行目 (coeff_df) の 同じ列 (col_idx) を参照
-                    unit_pt_val = coeff_df.iloc[0, col_idx]
+                    # 1. 係数の取得 (9行目 = meta_df index 8)
+                    # col_idxはdfでの列番号。meta_dfも同じ列構成のはずなのでそのまま使う
+                    unit_pt_val = coeff_row.iloc[col_idx]
                     unit_pt = pd.to_numeric(unit_pt_val, errors='coerce') or 0
                     
-                    # 2. 実績・目標・率: メインデータ (df) の 右隣の列 (+2, +5) を参照
+                    # 2. 全社平均の取得 (11行目 = meta_df index 10)
+                    avg_rate_val = avg_row.iloc[col_idx]
+                    company_avg_rate = pd.to_numeric(avg_rate_val, errors='coerce') or 0
+
+                    # 3. 自店データの取得
                     my_rate = pd.to_numeric(my_row.iloc[col_idx + OFFSET_RATE], errors='coerce') or 0
                     my_target_vol = pd.to_numeric(my_row.iloc[col_idx + OFFSET_TARGET], errors='coerce') or 0
                     
-                    # 3. 目標ランク平均率 (dfの右隣の列 +5)
-                    rank_rate_col_idx = col_idx + OFFSET_RATE
-                    rank_avg_rate = target_rank_df.iloc[:, rank_rate_col_idx].apply(pd.to_numeric, errors='coerce').mean()
+                    # 4. ギャップ計算 (全社平均 - 自店)
+                    # 全社平均より低い場合のみ対策が必要
+                    rate_gap = company_avg_rate - my_rate
                     
-                    target_rate = max(rank_avg_rate, my_rate)
-                    rate_gap = target_rate - my_rate
-                    
-                    # 係数が0でも、rate_gapがあればリストに入れる
+                    # 係数が0でも、rate_gapがあればリストには入れる
                     if rate_gap > 0:
+                        # 不足数 = (乖離率 / 100) * 自店目標
                         needed_vol = (rate_gap / 100) * my_target_vol
                         needed_vol = math.ceil(needed_vol)
+                        
                         gain_pt = needed_vol * unit_pt
                         daily_vol = needed_vol / remaining_days
 
                         analysis_list.append({
                             "name": item_name,
                             "current_rate": my_rate,
-                            "target_rate": target_rate,
+                            "target_rate": company_avg_rate, # ここが全社平均になる
                             "gain_pt": gain_pt,
                             "needed_vol": needed_vol,
                             "daily_vol": daily_vol,
@@ -194,13 +206,13 @@ if uploaded_file is not None:
             top_5_items = sorted(analysis_list, key=lambda x: x['gain_pt'], reverse=True)[:5]
 
             if not top_5_items:
-                st.warning("改善可能な項目が見つかりませんでした。（すべての項目で平均を上回っています）")
+                st.warning("全社平均を下回っている項目はありません。（優秀です！）")
             else:
                 # テーブル表示
                 h_cols = st.columns([2, 1.5, 1.5, 1.5, 1.5, 1.5])
                 h_cols[0].markdown("**項目名 (係数)**")
                 h_cols[1].markdown("**①現在率**")
-                h_cols[2].markdown(f"**②{target_rank}平均率**")
+                h_cols[2].markdown("**②全社平均**") # ヘッダー変更
                 h_cols[3].markdown("**③獲得Pt**")
                 h_cols[4].markdown("**④不足数**")
                 h_cols[5].markdown(f"**⑤日割り(残{int(remaining_days)}日)**")
@@ -210,17 +222,15 @@ if uploaded_file is not None:
                 for item in top_5_items:
                     cols = st.columns([2, 1.5, 1.5, 1.5, 1.5, 1.5])
                     
-                    # 係数が0の場合は警告色
                     pt_val = int(item['unit_pt'])
                     pt_display = f"{pt_val}"
                     if pt_val == 0:
-                         pt_display = "⚠️0 (設定確認)"
+                         pt_display = "⚠️0"
                     
                     cols[0].markdown(f"**{item['name']}** <br><small>係数: {pt_display}</small>", unsafe_allow_html=True)
                     cols[1].write(f"{item['current_rate']:.1f}%")
-                    cols[2].write(f"{item['target_rate']:.1f}%")
+                    cols[2].write(f"{item['target_rate']:.1f}%") # 全社平均
                     
-                    # 獲得Pt
                     gain_disp = f"+ {int(item['gain_pt']):,}"
                     if pt_val == 0:
                         cols[3].write(gain_disp)
@@ -235,16 +245,16 @@ if uploaded_file is not None:
 
                 st.markdown("### 📝 シミュレーション結果")
                 c_final1, c_final2 = st.columns(2)
-                c_final1.metric("目標までの不足分", f"{int(gap):,} pt")
+                c_final1.metric("目標ランクまでの不足分", f"{int(gap):,} pt")
                 
                 remaining_gap = gap - total_gain
                 
                 if total_gain == 0 and len(top_5_items) > 0:
-                     c_final2.warning("獲得Ptが0になっています。9行目の係数が正しく読み込まれているか確認してください。")
+                     c_final2.warning("獲得Ptが0になっています。9行目の係数を確認してください。")
                 elif remaining_gap <= 0:
-                    c_final2.success(f"この5項目で + {int(total_gain):,} pt 獲得し、目標達成可能です！")
+                    c_final2.success(f"この5項目を平均並みにすれば + {int(total_gain):,} pt で達成可能です！")
                 else:
-                    c_final2.warning(f"5項目で + {int(total_gain):,} pt ですが、まだ {int(remaining_gap):,} pt 足りません。")
+                    c_final2.warning(f"平均並みに改善しても + {int(total_gain):,} pt です。さらに上乗せが必要です。")
                 
         else:
             st.balloons()
@@ -252,8 +262,7 @@ if uploaded_file is not None:
 
     except Exception as e:
         st.error(f"エラーが発生しました: {e}")
-        st.info("Excelの形式を確認してください。")
+        st.info("シート名が『総合Ranking_達成率』であるか確認してください。")
 
 else:
     st.info("👈 サイドバーからExcelファイルをアップロードしてください。")
-
